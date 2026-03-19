@@ -7,3 +7,4 @@ simulate/mujoco
 simulate_python/config.py
 .gitignore
 simulate/config.yaml
+simulate (Copy)/
