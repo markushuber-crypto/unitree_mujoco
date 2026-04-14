@@ -441,7 +441,7 @@ namespace
                 ctrlnoise[i] = rate * ctrlnoise[i] + scale * mju_standardNormal(nullptr);
 
                 // apply noise
-                d->ctrl[i] = ctrlnoise[i];
+                d->ctrl[i] += ctrlnoise[i];
               }
             }
 
