@@ -8,8 +8,6 @@
 #include <unitree/dds_wrapper/robots/g1/g1.h>
 #include <unitree/idl/hg/BmsState_.hpp>
 #include <unitree/idl/hg/IMUState_.hpp>
-#include <unitree/idl/hg/HandCmd_.hpp>
-#include <unitree/idl/hg/HandState_.hpp>
 
 #include <iostream>
 
@@ -260,15 +258,6 @@ using Go2Bridge = RobotBridge<unitree::robot::go2::subscription::LowCmd, unitree
 
 class G1Bridge : public RobotBridge<unitree::robot::g1::subscription::LowCmd, unitree::robot::g1::publisher::LowState>
 {
-    static constexpr int NUM_BODY_MOTORS = 29;
-    static constexpr int NUM_HAND_MOTORS = 7; // per hand
-
-    // hand joint state addresses (qpos/qvel), populated in constructor when hands are present
-    int hand_left_qpos_adr_[NUM_HAND_MOTORS]  = {};
-    int hand_left_dof_adr_[NUM_HAND_MOTORS]   = {};
-    int hand_right_qpos_adr_[NUM_HAND_MOTORS] = {};
-    int hand_right_dof_adr_[NUM_HAND_MOTORS]  = {};
-
 public:
     G1Bridge(mjModel *model, mjData *data) : RobotBridge(model, data)
     {
@@ -284,107 +273,11 @@ public:
         bmsstate->msg_.soc() = 100;
 
         secondary_imustate = std::make_unique<IMUState_t>("rt/secondary_imu");
-
-        // If model has hand actuators (43 total), cap body motor count and init hand control
-        if (mj_model_->nu > NUM_BODY_MOTORS) {
-            num_motor_ = NUM_BODY_MOTORS; // body sensors still at [0..86]
-
-            // Precompute qpos/qvel addresses for each hand joint (DDS motor order)
-            static const char* left_joint_names[NUM_HAND_MOTORS] = {
-                "left_hand_thumb_0_joint", "left_hand_thumb_1_joint", "left_hand_thumb_2_joint",
-                "left_hand_index_0_joint", "left_hand_index_1_joint",
-                "left_hand_middle_0_joint", "left_hand_middle_1_joint"
-            };
-            static const char* right_joint_names[NUM_HAND_MOTORS] = {
-                "right_hand_thumb_0_joint", "right_hand_thumb_1_joint", "right_hand_thumb_2_joint",
-                "right_hand_index_0_joint", "right_hand_index_1_joint",
-                "right_hand_middle_0_joint", "right_hand_middle_1_joint"
-            };
-            for (int i = 0; i < NUM_HAND_MOTORS; i++) {
-                int jid = mj_name2id(mj_model_, mjOBJ_JOINT, left_joint_names[i]);
-                hand_left_qpos_adr_[i] = (jid >= 0) ? mj_model_->jnt_qposadr[jid] : -1;
-                hand_left_dof_adr_[i]  = (jid >= 0) ? mj_model_->jnt_dofadr[jid]  : -1;
-                jid = mj_name2id(mj_model_, mjOBJ_JOINT, right_joint_names[i]);
-                hand_right_qpos_adr_[i] = (jid >= 0) ? mj_model_->jnt_qposadr[jid] : -1;
-                hand_right_dof_adr_[i]  = (jid >= 0) ? mj_model_->jnt_dofadr[jid]  : -1;
-            }
-
-            // Hand state publishers
-            hand_left_state  = std::make_unique<HandState_t>("rt/lf/dex3/left/state");
-            hand_right_state = std::make_unique<HandState_t>("rt/lf/dex3/right/state");
-            hand_left_state->msg_.motor_state().resize(NUM_HAND_MOTORS);
-            hand_right_state->msg_.motor_state().resize(NUM_HAND_MOTORS);
-
-            // Hand command subscribers
-            hand_left_cmd_sub = std::make_shared<
-                unitree::robot::ChannelSubscriber<unitree_hg::msg::dds_::HandCmd_>>("rt/dex3/left/cmd");
-            hand_left_cmd_sub->InitChannel([this](const void* msg) {
-                std::lock_guard<std::mutex> lk(hand_left_mutex_);
-                hand_left_cmd_ = *reinterpret_cast<const unitree_hg::msg::dds_::HandCmd_*>(msg);
-                hand_left_active_ = true;
-            }, 1);
-
-            hand_right_cmd_sub = std::make_shared<
-                unitree::robot::ChannelSubscriber<unitree_hg::msg::dds_::HandCmd_>>("rt/dex3/right/cmd");
-            hand_right_cmd_sub->InitChannel([this](const void* msg) {
-                std::lock_guard<std::mutex> lk(hand_right_mutex_);
-                hand_right_cmd_ = *reinterpret_cast<const unitree_hg::msg::dds_::HandCmd_*>(msg);
-                hand_right_active_ = true;
-            }, 1);
-
-            hand_left_cmd_.motor_cmd().resize(NUM_HAND_MOTORS);
-            hand_right_cmd_.motor_cmd().resize(NUM_HAND_MOTORS);
-
-            std::cout << "[G1Bridge] Hand actuators detected: subscribing to rt/dex3/left/cmd and rt/dex3/right/cmd\n";
-        }
     }
 
     void run() override
     {
         RobotBridge::run();
-
-        // Hand control: apply HandCmd PD to ctrl[29..35] (left) and ctrl[36..42] (right)
-        // Reads joint state from qpos/qvel directly (no hand sensors in sensordata)
-        if (mj_model_->nu > NUM_BODY_MOTORS) {
-            {
-                std::lock_guard<std::mutex> lk(hand_left_mutex_);
-                for (int i = 0; i < NUM_HAND_MOTORS; i++) {
-                    if (hand_left_qpos_adr_[i] < 0) continue;
-                    const auto& m = hand_left_cmd_.motor_cmd()[i];
-                    double q  = mj_data_->qpos[hand_left_qpos_adr_[i]];
-                    double dq = mj_data_->qvel[hand_left_dof_adr_[i]];
-                    mj_data_->ctrl[NUM_BODY_MOTORS + i] = m.tau() + m.kp() * (m.q() - q) + m.kd() * (m.dq() - dq);
-                }
-            }
-            {
-                std::lock_guard<std::mutex> lk(hand_right_mutex_);
-                for (int i = 0; i < NUM_HAND_MOTORS; i++) {
-                    if (hand_right_qpos_adr_[i] < 0) continue;
-                    const auto& m = hand_right_cmd_.motor_cmd()[i];
-                    double q  = mj_data_->qpos[hand_right_qpos_adr_[i]];
-                    double dq = mj_data_->qvel[hand_right_dof_adr_[i]];
-                    mj_data_->ctrl[NUM_BODY_MOTORS + NUM_HAND_MOTORS + i] = m.tau() + m.kp() * (m.q() - q) + m.kd() * (m.dq() - dq);
-                }
-            }
-
-            // Publish hand state
-            if (hand_left_state->trylock()) {
-                for (int i = 0; i < NUM_HAND_MOTORS; i++) {
-                    if (hand_left_qpos_adr_[i] < 0) continue;
-                    hand_left_state->msg_.motor_state()[i].q()  = mj_data_->qpos[hand_left_qpos_adr_[i]];
-                    hand_left_state->msg_.motor_state()[i].dq() = mj_data_->qvel[hand_left_dof_adr_[i]];
-                }
-                hand_left_state->unlockAndPublish();
-            }
-            if (hand_right_state->trylock()) {
-                for (int i = 0; i < NUM_HAND_MOTORS; i++) {
-                    if (hand_right_qpos_adr_[i] < 0) continue;
-                    hand_right_state->msg_.motor_state()[i].q()  = mj_data_->qpos[hand_right_qpos_adr_[i]];
-                    hand_right_state->msg_.motor_state()[i].dq() = mj_data_->qvel[hand_right_dof_adr_[i]];
-                }
-                hand_right_state->unlockAndPublish();
-            }
-        }
 
         // secondary IMU state
         if (secondary_imustate->trylock()) {
@@ -423,21 +316,8 @@ public:
         bmsstate->unlockAndPublish();
     }
 
-    using BmsState_t   = unitree::robot::RealTimePublisher<unitree_hg::msg::dds_::BmsState_>;
-    using IMUState_t   = unitree::robot::RealTimePublisher<unitree_hg::msg::dds_::IMUState_>;
-    using HandState_t  = unitree::robot::RealTimePublisher<unitree_hg::msg::dds_::HandState_>;
-    std::unique_ptr<BmsState_t>  bmsstate;
-    std::unique_ptr<IMUState_t>  secondary_imustate;
-    std::unique_ptr<HandState_t> hand_left_state;
-    std::unique_ptr<HandState_t> hand_right_state;
-
-private:
-    unitree::robot::ChannelSubscriberPtr<unitree_hg::msg::dds_::HandCmd_> hand_left_cmd_sub;
-    unitree::robot::ChannelSubscriberPtr<unitree_hg::msg::dds_::HandCmd_> hand_right_cmd_sub;
-    unitree_hg::msg::dds_::HandCmd_ hand_left_cmd_;
-    unitree_hg::msg::dds_::HandCmd_ hand_right_cmd_;
-    std::mutex hand_left_mutex_;
-    std::mutex hand_right_mutex_;
-    bool hand_left_active_  = false;
-    bool hand_right_active_ = false;
+    using BmsState_t = unitree::robot::RealTimePublisher<unitree_hg::msg::dds_::BmsState_>;
+    using IMUState_t = unitree::robot::RealTimePublisher<unitree_hg::msg::dds_::IMUState_>;
+    std::unique_ptr<BmsState_t> bmsstate;
+    std::unique_ptr<IMUState_t> secondary_imustate;
 };
