@@ -1,7 +1,7 @@
 robot: "g1"
 robot_scene: "scene_29dof.xml"
 
-domain_id: 0
+domain_id: 22
 interface: "wlp9s0" # ADD WLAN PORT INDIVIDUALLY
 
 use_joystick: 1
